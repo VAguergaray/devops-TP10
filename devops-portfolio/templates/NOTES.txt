@@ -1,0 +1,9 @@
+DevOps Portfolio instalado.
+
+Release:   {{ .Release.Name }}
+Namespace: {{ .Values.global.namespace }}
+Entorno:   {{ .Values.global.environment }}
+
+Para acceder (el ingress escucha en el NodePort 30080):
+  1. echo "$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[0].address}') {{ .Values.ingress.host }}" | sudo tee -a /etc/hosts
+  2. curl http://{{ .Values.ingress.host }}:30080/health
