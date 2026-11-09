@@ -1,0 +1,46 @@
+global:
+  namespace: production-tp10c
+  environment: production
+
+postgres:
+  storage:
+    size: 5Gi
+  credentials:
+    password: "production-placeholder"
+
+backend:
+  replicas: 3
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "500m"
+    limits:
+      memory: "512Mi"
+      cpu: "1000m"
+  image:
+    repository: valennzarat/devops-portfolio
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+frontend:
+  replicas: 3
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "500m"
+  image:
+    repository: valennzarat/devops-frontend
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+ingress:
+  enabled: true
+  host: devops-portfolio.com

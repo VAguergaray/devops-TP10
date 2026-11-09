@@ -1,0 +1,55 @@
+global:
+  namespace: staging-tp10c
+  environment: staging
+
+postgres:
+  storage:
+    size: 1Gi
+  credentials:
+    password: "staging-placeholder"
+
+backend:
+  replicas: 1
+  autoscaling:
+    enabled: false
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "500m"
+  image:
+    repository: valennzarat/devops-portfolio
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  replicas: 1
+
+frontend:
+  replicas: 1
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "128Mi"
+      cpu: "200m"
+  image:
+    repository: valennzarat/devops-frontend
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  replicas: 1
+
+ingress:
+  enabled: true
+  host: staging.devops-portfolio.local
+
+image:
+    repository: valennzarat/devops-portfolio
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+image:
+    repository: valennzarat/devops-frontend
+    tag: "latest"
+    pullPolicy: IfNotPresent

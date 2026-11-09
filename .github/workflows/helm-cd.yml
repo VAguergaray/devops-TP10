@@ -1,0 +1,218 @@
+name: TP10C - Helm Continuous Delivery
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'devops-portfolio/**'
+      - 'scripts/**'
+      - 'values-*.yaml'
+      - '.github/workflows/helm-cd.yml'
+
+  pull_request:
+    branches:
+      - main
+      - develop
+
+  workflow_dispatch:
+    inputs:
+      deploy_staging:
+        description: 'Desplegar en Staging'
+        required: true
+        type: boolean
+        default: false
+
+      deploy_production:
+        description: 'Desplegar en Producción'
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+
+  validate:
+    name: Validar Helm y manifiestos
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.22.1
+
+      - name: Instalar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar PyYAML
+        run: pip install pyyaml
+
+      - name: Helm lint Staging
+        run: helm lint ./devops-portfolio -f devops-portfolio/values-staging.yaml
+
+      - name: Helm lint Producción
+        run: helm lint ./devops-portfolio -f devops-portfolio/values-prod.yaml
+
+      - name: Render Staging
+        run: |
+          helm template notes-staging ./devops-portfolio \
+            --namespace staging-tp10c \
+            -f devops-portfolio/values-staging.yaml \
+            > /tmp/staging.yaml
+
+      - name: Render Producción
+        run: |
+          helm template notes-production ./devops-portfolio \
+            --namespace production-tp10c \
+            -f devops-portfolio/values-prod.yaml \
+            > /tmp/production.yaml
+
+      - name: Validar YAML
+        run: |
+          python - <<'PY'
+          import yaml
+
+          for path in ["/tmp/staging.yaml", "/tmp/production.yaml"]:
+              with open(path, encoding="utf-8") as file:
+                  docs = [d for d in yaml.safe_load_all(file) if d]
+
+              assert docs, f"No se generaron recursos: {path}"
+
+              for doc in docs:
+                  assert "apiVersion" in doc
+                  assert "kind" in doc
+
+              print(f"OK: {path} - {len(docs)} recursos")
+          PY
+
+  deploy_staging:
+    name: Desplegar Staging
+    needs: validate
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy_staging
+    runs-on: [self-hosted, linux, x64, kind-tp10c]
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar Helm
+        uses: azure/setup-helm@v4
+
+      - name: Desplegar Staging
+        run: |
+          helm upgrade --install notes-staging ./devops-portfolio \
+            --namespace staging-tp10c \
+            --create-namespace \
+            -f devops-portfolio/values-staging.yaml
+
+      - name: Smoke test Staging
+        run: |
+          kubectl rollout status deployment/backend -n staging-tp10c --timeout=180s
+          kubectl rollout status deployment/frontend -n staging-tp10c --timeout=180s
+          kubectl rollout status deployment/postgres -n staging-tp10c --timeout=180s
+
+          kubectl port-forward svc/backend-service 5000:5000 \
+            -n staging-tp10c >/tmp/staging-port-forward.log 2>&1 &
+          PF_PID=$!
+          trap 'kill $PF_PID 2>/dev/null || true' EXIT
+
+          for i in {1..20}; do
+            if curl -fsS http://localhost:5000/health; then
+              exit 0
+            fi
+            sleep 3
+          done
+
+          echo "Smoke test Staging fallido"
+          exit 1
+
+  deploy_production:
+    name: Desplegar Producción
+    needs: [validate, deploy_staging]
+    if: |
+      always() &&
+      needs.validate.result == 'success' &&
+      (needs.deploy_staging.result == 'success' || needs.deploy_staging.result == 'skipped') &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.deploy_production
+    runs-on: [self-hosted, linux, x64, kind-tp10c]
+    environment: production
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar Helm
+        uses: azure/setup-helm@v4
+
+      - name: Desplegar y guardar revisión anterior
+        id: deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PREVIOUS_REVISION=$(helm history notes-production \
+            -n production-tp10c -o json 2>/dev/null |
+            python3 -c '
+          import json,sys
+          try:
+              data=json.load(sys.stdin)
+              print(data[-1]["revision"] if data else "")
+          except Exception:
+              print("")
+          ')
+
+          echo "previous_revision=$PREVIOUS_REVISION" >> "$GITHUB_OUTPUT"
+
+          helm upgrade --install notes-production ./devops-portfolio \
+            --namespace production-tp10c \
+            --create-namespace \
+            -f devops-portfolio/values-prod.yaml \
+            --wait --timeout 5m --atomic
+
+      - name: Smoke test Producción
+        id: smoke
+        continue-on-error: true
+        run: |
+          kubectl rollout status deployment/backend -n production-tp10c --timeout=180s
+          kubectl rollout status deployment/frontend -n production-tp10c --timeout=180s
+          kubectl rollout status deployment/postgres -n production-tp10c --timeout=180s
+
+          kubectl port-forward svc/backend-service 5001:5000 \
+            -n production-tp10c >/tmp/production-port-forward.log 2>&1 &
+          PF_PID=$!
+          trap 'kill $PF_PID 2>/dev/null || true' EXIT
+
+          for i in {1..20}; do
+            if curl -fsS http://localhost:5001/health; then
+              exit 0
+            fi
+            sleep 3
+          done
+
+          echo "Smoke test Producción fallido"
+          exit 1
+
+      - name: Rollback si falla el Smoke Test
+        if: steps.smoke.outcome == 'failure'
+        run: |
+          PREVIOUS="${{ steps.deploy.outputs.previous_revision }}"
+
+          if [ -n "$PREVIOUS" ]; then
+            helm rollback notes-production "$PREVIOUS" \
+              -n production-tp10c --wait
+          else
+            helm uninstall notes-production -n production-tp10c
+          fi
+
+          exit 1
+
+      - name: Producción finalizada
+        if: steps.smoke.outcome == 'success'
+        run: echo "Producción desplegada y validada correctamente."
